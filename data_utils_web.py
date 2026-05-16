@@ -24,9 +24,14 @@ def load_csv(source) -> pd.DataFrame:
     """
     if isinstance(source, (str, Path)):
         df = pd.read_csv(source, skipinitialspace=True)
+    elif isinstance(source, (bytes, bytearray)):
+        df = pd.read_csv(io.BytesIO(source), skipinitialspace=True)
+    elif isinstance(source, io.BytesIO):
+        source.seek(0)   # always seek to start — critical after any prior read
+        df = pd.read_csv(source, skipinitialspace=True)
     else:
-        df = pd.read_csv(io.BytesIO(source.read()) if hasattr(source, 'read') else source,
-                         skipinitialspace=True)
+        # file-like with .read()
+        df = pd.read_csv(io.BytesIO(source.read()), skipinitialspace=True)
     df.columns = [c.strip() for c in df.columns]
     disp_col = load_col = None
 
@@ -121,24 +126,34 @@ def export_tests_to_xlsx_bytes(tests, db) -> bytes:
             'Whole Std Smooth':      a.get('whole_std_smooth'),
         }
         regions = json.loads(a.get('regions_json', '[]') or '[]')
+
+        # Load CSV once per test (not once per region)
+        _x, _y, _ys = None, None, None
+        try:
+            raw = db.get_csv_data(t['id'])
+            if raw:
+                _df  = load_csv(raw)   # pass raw bytes directly
+                _x   = _df['displacement'].values
+                _y   = _df['load'].values
+                _w   = int(a.get('smoothing_window', 51) or 51)
+                _ys  = smooth_data(_y, _w)
+        except Exception as _e:
+            row['_csv_load_error'] = str(_e)
+
         for i, reg in enumerate(regions):
             pfx = f"R{i+1}_{'C' if reg.get('consistent') else 'X'}"
             row[f"{pfx}_start_mm"] = reg.get('xmin', '')
             row[f"{pfx}_end_mm"]   = reg.get('xmax', '')
-            try:
-                raw = db.get_csv_data(t['id'])
-                df  = load_csv(io.BytesIO(raw))
-                x, y = df['displacement'].values, df['load'].values
-                w    = int(a.get('smoothing_window', 51) or 51)
-                ys   = smooth_data(y, w)
-                mask = (x >= reg['xmin']) & (x <= reg['xmax'])
-                sr   = calc_stats(y[mask])
-                ss   = calc_stats(ys[mask])
-                for k in ['mean', 'max', 'min', 'std']:
-                    row[f"{pfx}_{k}_raw"]    = sr[k]
-                    row[f"{pfx}_{k}_smooth"] = ss[k]
-            except Exception:
-                pass
+            if _x is not None:
+                try:
+                    mask = (_x >= reg['xmin']) & (_x <= reg['xmax'])
+                    sr   = calc_stats(_y[mask])
+                    ss   = calc_stats(_ys[mask])
+                    for k in ['mean', 'max', 'min', 'std']:
+                        row[f"{pfx}_{k}_raw"]    = sr[k]
+                        row[f"{pfx}_{k}_smooth"] = ss[k]
+                except Exception:
+                    pass   # mask empty or bad xmin/xmax
         rows.append(row)
 
     buf = io.BytesIO()

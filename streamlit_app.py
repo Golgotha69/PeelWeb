@@ -648,19 +648,33 @@ elif "Sequential" in page:
         st.session_state.seq_done     = False
 
     def _seq_save_current():
-        """Save analysis for the current sequential test."""
-        tests = st.session_state.seq_tests
-        idx   = st.session_state.seq_idx
+        """Save analysis for the current sequential test.
+
+        Saves:
+          • whole-range raw stats   (calc_stats over all y)
+          • whole-range smooth stats (calc_stats over all ys)
+          • regions list            (xmin, xmax, color, type, consistent)
+
+        Region-level stats are NOT stored in analyses.regions_json —
+        they are recomputed at export time from the stored regions + raw CSV.
+        This matches the desktop app behaviour.
+        """
+        tests   = st.session_state.seq_tests
+        idx     = st.session_state.seq_idx
         if idx >= len(tests): return
-        t     = tests[idx]
-        sw    = st.session_state.seq_smoothing
-        x, y  = _load_test_data(t)
+        t       = tests[idx]
+        sw      = st.session_state.seq_smoothing
+        x, y    = _load_test_data(t)
         if x is None: return
-        ys    = smooth_data(y, sw)
+        ys      = smooth_data(y, sw)
+        # Take a deep copy of regions so clearing seq_regions after save
+        # does not affect what was just passed to save_analysis.
+        import copy
+        regions_to_save = copy.deepcopy(st.session_state.seq_regions)
         db.save_analysis(
             t['id'], sw,
             calc_stats(y), calc_stats(ys),
-            st.session_state.seq_regions)
+            regions_to_save)
 
     # ── Not yet started ───────────────────────────────────────────────────────
     if not st.session_state.seq_active and not st.session_state.seq_done:
@@ -853,17 +867,44 @@ elif "Sequential" in page:
                         'type': 'consistent', 'consistent': True})
                     st.rerun()
 
-            # Whole-range stats preview
+            # Stats preview — whole range + per region
             if st.session_state.seq_regions:
-                st.markdown("**Preview stats (whole range):**")
                 ws  = calc_stats(y)
                 wss = calc_stats(ys)
+
+                st.markdown("**Whole-range stats:**")
                 prev_df = pd.DataFrame({
                     'Metric': ['Mean','Max','Min','Std'],
                     'Raw':    [f"{ws[k]:.4f}"  for k in ['mean','max','min','std']],
                     'Smooth': [f"{wss[k]:.4f}" for k in ['mean','max','min','std']],
                 })
                 st.dataframe(prev_df, use_container_width=True, hide_index=True)
+
+                st.markdown("**Region stats (will be exported):**")
+                for ri, reg in enumerate(st.session_state.seq_regions):
+                    rc = reg.get('color', REGION_COLORS[ri % len(REGION_COLORS)])
+                    mask = (x >= reg['xmin']) & (x <= reg['xmax'])
+                    n_pts = int(mask.sum())
+                    if n_pts == 0:
+                        st.markdown(
+                            f"<span style='color:{rc}'>●</span> "
+                            f"**R{ri+1}** {reg['xmin']:.2f}→{reg['xmax']:.2f} mm "
+                            f"— ⚠️ no data points in this range",
+                            unsafe_allow_html=True)
+                    else:
+                        sr = calc_stats(y[mask])
+                        ss = calc_stats(ys[mask])
+                        st.markdown(
+                            f"<span style='color:{rc}'>●</span> "
+                            f"**R{ri+1}** {reg['xmin']:.2f}→{reg['xmax']:.2f} mm "
+                            f"({n_pts} pts)",
+                            unsafe_allow_html=True)
+                        rdf = pd.DataFrame({
+                            'Metric': ['Mean','Max','Min','Std'],
+                            'Raw':    [f"{sr[k]:.4f}" for k in ['mean','max','min','std']],
+                            'Smooth': [f"{ss[k]:.4f}" for k in ['mean','max','min','std']],
+                        })
+                        st.dataframe(rdf, use_container_width=True, hide_index=True)
 
         with right:
             fig = _draw_test_figure(
